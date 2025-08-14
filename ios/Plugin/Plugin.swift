@@ -139,6 +139,59 @@ public class MsAuthPlugin: CAPPlugin {
         }
     }
 
+    @objc func acquireTokenSilent(_ call: CAPPluginCall) {
+        guard let context = createContextFromPluginCall(call) else {
+            call.reject("Unable to create context, check logs")
+            return
+        }
+
+        let scopes = call.getArray("scopes", String.self) ?? []
+        
+        // For silent token acquisition, we need to have an existing account
+        loadCurrentAccount(applicationContext: context) { (account) in
+            guard let currentAccount = account else {
+                // No account found, reject with appropriate error
+                call.reject("No account found. User must login first.")
+                return
+            }
+            
+            // Create parameters for silent token acquisition
+            let parameters = MSALSilentTokenParameters(scopes: scopes, account: currentAccount)
+            
+            // Attempt silent token acquisition
+            context.acquireTokenSilent(with: parameters) { (result, error) in
+                if let error = error {
+                    let nsError = error as NSError
+                    
+                    // Check if it's an interaction required error
+                    if nsError.domain == MSALErrorDomain {
+                        if nsError.code == MSALError.interactionRequired.rawValue {
+                            // Don't automatically fall back to interactive
+                            // Let the calling code handle this
+                            call.reject("User interaction required", "INTERACTION_REQUIRED", error)
+                            return
+                        }
+                    }
+                    
+                    call.reject("Unable to acquire token silently: \(error.localizedDescription)", nil, error)
+                    return
+                }
+                
+                guard let result = result else {
+                    call.reject("Empty result found")
+                    return
+                }
+                
+                // Return the tokens
+                call.resolve([
+                    "accessToken": result.accessToken,
+                    "idToken": result.idToken,
+                    "scopes": result.scopes
+                ])
+            }
+        }
+    }
+
     private func createContextFromPluginCall(_ call: CAPPluginCall) -> MSALPublicClientApplication? {
         guard let clientId = call.getString("clientId") else {
             call.reject("Invalid client ID specified.")
