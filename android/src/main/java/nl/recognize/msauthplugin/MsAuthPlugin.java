@@ -41,12 +41,14 @@ public class MsAuthPlugin extends Plugin {
     @PluginMethod
     public void login(final PluginCall call) {
         try {
+            Logger.info("MsAuthPlugin.login() - Starting login process");
             ISingleAccountPublicClientApplication context = this.createContextFromPluginCall(call);
 
             if (context == null) {
                 call.reject("Context was null");
                 return;
             }
+            Logger.info("MsAuthPlugin.login() - Context created successfully");
 
             Prompt prompt = Prompt.SELECT_ACCOUNT;
             if (call.hasOption("prompt")) {
@@ -72,13 +74,24 @@ public class MsAuthPlugin extends Plugin {
                 }
             }
 
-            this.acquireToken(context, call.getArray("scopes").toList(), prompt, tokenResult -> {
+            Logger.info("MsAuthPlugin.login() - About to call acquireToken with scopes: " + call.getArray("scopes"));
+            List<String> scopes;
+            try {
+                scopes = call.getArray("scopes").toList();
+                Logger.info("MsAuthPlugin.login() - Scopes parsed successfully: " + scopes);
+            } catch (Exception e) {
+                Logger.error("MsAuthPlugin.login() - Error parsing scopes", e);
+                call.reject("Error parsing scopes: " + e.getMessage());
+                return;
+            }
+            
+            this.acquireToken(context, scopes, prompt, tokenResult -> {
                     if (tokenResult != null) {
                         JSObject result = new JSObject();
                         result.put("accessToken", tokenResult.getAccessToken());
                         result.put("idToken", tokenResult.getIdToken());
-                        JSONArray scopes = new JSONArray(Arrays.asList(tokenResult.getScopes()));
-                        result.put("scopes", scopes);
+                        JSONArray scopesArray = new JSONArray(Arrays.asList(tokenResult.getScopes()));
+                        result.put("scopes", scopesArray);
 
                         call.resolve(result);
                     } else {
@@ -87,7 +100,7 @@ public class MsAuthPlugin extends Plugin {
                 });
         } catch (Exception ex) {
             Logger.error("Unable to login: " + ex.getMessage(), ex);
-            call.reject("Unable to fetch access token.");
+            call.reject("Unable to fetch access token: " + ex.getMessage(), ex.getMessage(), ex);
         }
     }
 
@@ -130,6 +143,57 @@ public class MsAuthPlugin extends Plugin {
         logout(call);
     }
 
+    @PluginMethod
+    public void acquireTokenSilent(final PluginCall call) {
+        try {
+            ISingleAccountPublicClientApplication context = this.createContextFromPluginCall(call);
+
+            if (context == null) {
+                call.reject("Context was null");
+                return;
+            }
+
+            ICurrentAccountResult result = context.getCurrentAccount();
+            if (result.getCurrentAccount() == null) {
+                call.reject("No account found. User must login first.");
+                return;
+            }
+
+            List<String> scopes = call.getArray("scopes").toList();
+            String authority = getAuthorityUrl(context);
+
+            try {
+                Logger.info("Starting silent token acquisition");
+                AcquireTokenSilentParameters.Builder builder = new AcquireTokenSilentParameters.Builder()
+                    .withScopes(scopes)
+                    .fromAuthority(authority)
+                    .forAccount(result.getCurrentAccount());
+
+                AcquireTokenSilentParameters parameters = builder.build();
+                IAuthenticationResult silentAuthResult = context.acquireTokenSilent(parameters);
+                IAccount account = silentAuthResult.getAccount();
+
+                JSObject jsResult = new JSObject();
+                jsResult.put("accessToken", silentAuthResult.getAccessToken());
+                jsResult.put("idToken", account.getIdToken());
+                JSONArray scopesArray = new JSONArray(Arrays.asList(silentAuthResult.getScope()));
+                jsResult.put("scopes", scopesArray);
+
+                call.resolve(jsResult);
+            } catch (MsalUiRequiredException ex) {
+                // User interaction is required, don't automatically fall back to interactive
+                Logger.error("User interaction required for token acquisition", ex);
+                call.reject("User interaction required", "INTERACTION_REQUIRED", ex);
+            } catch (MsalException ex) {
+                Logger.error("Unable to acquire token silently", ex);
+                call.reject("Unable to acquire token silently: " + ex.getMessage(), null, ex);
+            }
+        } catch (Exception ex) {
+            Logger.error("Exception occurred during silent token acquisition", ex);
+            call.reject("Unable to fetch access token silently: " + ex.getMessage());
+        }
+    }
+
     protected String getAuthorityUrl(ISingleAccountPublicClientApplication context) {
         return context.getConfiguration().getDefaultAuthority().getAuthorityURL().toString();
     }
@@ -140,9 +204,12 @@ public class MsAuthPlugin extends Plugin {
         Prompt prompt,
         final TokenResultCallback callback
     ) throws MsalException, InterruptedException {
+        Logger.info("acquireToken() - Starting token acquisition");
         String authority = getAuthorityUrl(context);
+        Logger.info("acquireToken() - Authority URL: " + authority);
 
         ICurrentAccountResult result = context.getCurrentAccount();
+        Logger.info("acquireToken() - Current account: " + (result.getCurrentAccount() != null ? "exists" : "null"));
         if (result.getCurrentAccount() != null) {
             try {
                 Logger.info("Starting silent login flow");
